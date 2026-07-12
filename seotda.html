@@ -852,6 +852,7 @@ function startRound() {
   G.pot = 0; G.currentBet = 0; G.myBet = 0; G.oppBet = 0;
   G.myDied = false; G.oppDied = false;
   G.betPhase = true; G.myTurn = true; G.roundActive = true;
+  G.aiChecked = false;
 
   const deck = shuffle(buildDeck());
   G.myHand  = [deck[0], deck[1]];
@@ -1037,11 +1038,19 @@ window.doDie = function() {
 };
 
 function doCheck() {
-  setLog('체크. 상대에게 넘깁니다.');
+  if (!G.myTurn || !G.roundActive) return;
+  hideBetButtons();
   if (G.mode === 'ai') {
-    setBetButtons(false);
-    updateUI();
-    setTimeout(aiOpen, 900);
+    if (G.aiChecked) {
+      // AI도 체크했었음 → 둘 다 체크 → 쇼다운
+      G.aiChecked = false;
+      setLog('둘 다 체크! 패를 공개합니다.');
+      setTimeout(showdown, 600);
+    } else {
+      // 내가 먼저 체크 → AI 차례
+      setLog('체크. AI 생각 중...');
+      setTimeout(aiOpen, 900);
+    }
   } else {
     multiSendAction('check', 0);
   }
@@ -1051,68 +1060,86 @@ function doCheck() {
    🤖 AI LOGIC
    ═══════════════════════════ */
 function aiOpen() {
-  // AI is first to act (or responding to check)
-  const myRank = getHandRank(G.oppHand[0], G.oppHand[1]).rank;
+  // AI acts first (or after player checks)
+  const aiRank = getHandRank(G.oppHand[0], G.oppHand[1]).rank;
   if (G.aiDifficulty === 'hard') {
-    if (myRank >= 12) {           // 땡 → 배팅
-      const bet = 50 + Math.floor(Math.random()*50)*10;
-      aiRaise(bet);
-    } else if (myRank >= 4) {     // 6끗 이상 → 가끔 배팅
-      Math.random() > 0.4 ? aiRaise(30) : aiCheck();
+    if (aiRank >= 12) {
+      // 땡 이상 → 무조건 큰 배팅
+      const bet = 50 + Math.floor(Math.random()*5)*20;
+      aiDoRaise(bet);
+    } else if (aiRank >= 6) {
+      // 6끗 이상 → 70% 확률로 배팅
+      Math.random() < 0.7 ? aiDoRaise(20 + Math.floor(Math.random()*3)*10) : aiDoCheck();
+    } else if (aiRank >= 0) {
+      // 그 이하 → 30% 확률로 블러핑 배팅
+      Math.random() < 0.3 ? aiDoRaise(20) : aiDoCheck();
     } else {
-      aiCheck();
+      aiDoCheck();
     }
   } else {
-    // Easy: mostly random
-    Math.random() > 0.5 ? aiRaise(20 + Math.floor(Math.random()*3)*10) : aiCheck();
+    // 쉬움: 50% 확률로 랜덤 배팅
+    Math.random() < 0.5
+      ? aiDoRaise(10 + Math.floor(Math.random()*4)*10)
+      : aiDoCheck();
   }
 }
 
 function aiRespond() {
-  const myRank = getHandRank(G.oppHand[0], G.oppHand[1]).rank;
+  // AI responds to player's bet
+  const aiRank = getHandRank(G.oppHand[0], G.oppHand[1]).rank;
   if (G.aiDifficulty === 'hard') {
-    if (myRank >= 12)      { aiCall(); }
-    else if (myRank >= 6)  { Math.random()>0.3 ? aiCall() : aiDie(); }
-    else                   { Math.random()>0.6 ? aiCall() : aiDie(); }
+    if (aiRank >= 12)     { aiDoCall(); }                                        // 땡 → 무조건 콜
+    else if (aiRank >= 6) { Math.random() < 0.7 ? aiDoCall() : aiDoDie(); }    // 6끗 이상 → 70% 콜
+    else if (aiRank >= 0) { Math.random() < 0.35 ? aiDoCall() : aiDoDie(); }   // 그 이하 → 35% 콜
+    else { aiDoDie(); }
   } else {
-    Math.random() > 0.5 ? aiCall() : aiDie();
+    // 쉬움: 50% 콜
+    Math.random() < 0.5 ? aiDoCall() : aiDoDie();
   }
 }
 
-function aiCall() {
+function aiDoCall() {
   const needed = G.currentBet - G.oppBet;
+  if (needed > G.chips.opp) { aiDoDie(); return; }
   G.chips.opp -= needed;
   G.oppBet = G.currentBet;
   G.pot += needed;
-  setLog('AI가 콜했습니다.');
+  setLog(`AI가 ${G.currentBet}칩 콜했습니다!`);
   updateUI();
-  setTimeout(showdown, 700);
+  setTimeout(showdown, 800);
 }
-function aiRaise(amt) {
-  if (G.chips.opp < amt) { aiCheck(); return; }
+
+function aiDoRaise(amt) {
+  if (G.chips.opp < amt) { aiDoCheck(); return; }
   const needed = amt - G.oppBet;
   G.chips.opp -= needed;
   G.oppBet = amt;
   G.currentBet = amt;
   G.pot += needed;
   G.myTurn = true;
-  setLog(`AI가 ${amt}칩 배팅!`);
+  G.roundActive = true;
+  setLog(`AI가 ${amt}칩 배팅했습니다!`);
   updateUI();
   showBetButtons('respond');
-  setBetStatus(`AI 배팅: ${amt}칩 — 콜/다이`);
+  setBetStatus(`AI 배팅: ${amt}칩 — 콜 / 올리기 / 다이`);
 }
-function aiDie() {
+
+function aiDoDie() {
   G.oppDied = true;
-  setLog('AI가 다이했습니다!');
+  setLog('AI가 다이했습니다! 이번 판 승리!');
   awardPot('me');
   setTimeout(() => afterRoundAI('me'), 1000);
 }
-function aiCheck() {
+
+function aiDoCheck() {
+  // AI checks → player gets to act (배팅 or 체크→쇼다운)
+  G.aiChecked = true;
   G.myTurn = true;
-  setLog('AI가 체크했습니다. 당신 차례입니다.');
+  G.roundActive = true;
+  setLog('AI가 체크했습니다. 배팅 또는 체크(쇼다운)!');
   updateUI();
   showBetButtons('open');
-  setBetStatus('체크 — 배팅 또는 쇼다운');
+  setBetStatus('AI 체크 — 배팅 또는 체크(쇼다운)');
 }
 
 /* ═══════════════════════════
@@ -1302,15 +1329,237 @@ function renderCards(revealOpp = false) {
   });
 }
 
+const CARD_SVGS = {
+  1: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 소나무 줄기 -->
+    <line x1="30" y1="70" x2="30" y2="30" stroke="#5a3a1a" stroke-width="3"/>
+    <line x1="30" y1="45" x2="18" y2="35" stroke="#5a3a1a" stroke-width="2"/>
+    <line x1="30" y1="50" x2="42" y2="40" stroke="#5a3a1a" stroke-width="2"/>
+    <!-- 솔잎 -->
+    <ellipse cx="22" cy="28" rx="10" ry="6" fill="#2d6a2d" transform="rotate(-20 22 28)"/>
+    <ellipse cx="38" cy="24" rx="10" ry="6" fill="#2d6a2d" transform="rotate(20 38 24)"/>
+    <ellipse cx="30" cy="20" rx="10" ry="6" fill="#3a8a3a" transform="rotate(0 30 20)"/>
+    <!-- 학 -->
+    <ellipse cx="30" cy="14" rx="5" ry="3" fill="white"/>
+    <line x1="25" y1="14" x2="18" y2="10" stroke="white" stroke-width="1.5"/>
+    <line x1="35" y1="14" x2="42" y2="10" stroke="white" stroke-width="1.5"/>
+    <circle cx="30" cy="11" r="2.5" fill="white"/>
+    <circle cx="31" cy="10.5" r="1" fill="#cc0000"/>
+    <!-- 월 표시 -->
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">1月</text>
+  </svg>`,
+  2: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 매화 가지 -->
+    <line x1="30" y1="75" x2="30" y2="25" stroke="#5a3a1a" stroke-width="2.5"/>
+    <line x1="30" y1="55" x2="15" y2="40" stroke="#5a3a1a" stroke-width="2"/>
+    <line x1="30" y1="45" x2="45" y2="32" stroke="#5a3a1a" stroke-width="2"/>
+    <line x1="30" y1="35" x2="20" y2="25" stroke="#5a3a1a" stroke-width="1.5"/>
+    <!-- 매화꽃 -->
+    <circle cx="15" cy="38" r="5" fill="#ffaacc"/>
+    <circle cx="12" cy="35" r="3" fill="#ff88aa"/>
+    <circle cx="18" cy="35" r="3" fill="#ff88aa"/>
+    <circle cx="15" cy="32" r="3" fill="#ff88aa"/>
+    <circle cx="12" cy="41" r="3" fill="#ff88aa"/>
+    <circle cx="18" cy="41" r="3" fill="#ff88aa"/>
+    <circle cx="15" cy="38" r="2" fill="#ffddee"/>
+    <circle cx="45" cy="30" r="5" fill="#ffaacc"/>
+    <circle cx="42" cy="27" r="3" fill="#ff88aa"/>
+    <circle cx="48" cy="27" r="3" fill="#ff88aa"/>
+    <circle cx="45" cy="24" r="3" fill="#ff88aa"/>
+    <circle cx="42" cy="33" r="3" fill="#ff88aa"/>
+    <circle cx="48" cy="33" r="3" fill="#ff88aa"/>
+    <circle cx="45" cy="30" r="2" fill="#ffddee"/>
+    <circle cx="22" cy="22" r="4" fill="#ffaacc"/>
+    <circle cx="22" cy="22" r="1.5" fill="#ffddee"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">2月</text>
+  </svg>`,
+  3: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 벚꽃 나무 -->
+    <line x1="30" y1="78" x2="30" y2="35" stroke="#6b4423" stroke-width="4"/>
+    <line x1="30" y1="50" x2="15" y2="38" stroke="#6b4423" stroke-width="2.5"/>
+    <line x1="30" y1="45" x2="45" y2="35" stroke="#6b4423" stroke-width="2.5"/>
+    <!-- 벚꽃 -->
+    <circle cx="14" cy="30" r="8" fill="#ffccdd" opacity="0.9"/>
+    <circle cx="25" cy="22" r="8" fill="#ffbbcc" opacity="0.9"/>
+    <circle cx="38" cy="20" r="9" fill="#ffccdd" opacity="0.9"/>
+    <circle cx="48" cy="28" r="7" fill="#ffbbcc" opacity="0.9"/>
+    <circle cx="20" cy="32" r="6" fill="#ffddee" opacity="0.8"/>
+    <circle cx="40" cy="30" r="6" fill="#ffddee" opacity="0.8"/>
+    <!-- 꽃잎 점 -->
+    <circle cx="14" cy="30" r="2" fill="#ff6699"/>
+    <circle cx="25" cy="22" r="2" fill="#ff6699"/>
+    <circle cx="38" cy="20" r="2" fill="#ff6699"/>
+    <circle cx="48" cy="28" r="2" fill="#ff6699"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">3月</text>
+  </svg>`,
+  4: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 흑싸리 줄기 -->
+    <line x1="20" y1="78" x2="20" y2="20" stroke="#4a3a2a" stroke-width="2"/>
+    <line x1="35" y1="78" x2="35" y2="25" stroke="#4a3a2a" stroke-width="2"/>
+    <!-- 싸리 잎 -->
+    <ellipse cx="14" cy="35" rx="7" ry="4" fill="#2d5a1a" transform="rotate(-30 14 35)"/>
+    <ellipse cx="26" cy="30" rx="7" ry="4" fill="#2d5a1a" transform="rotate(30 26 30)"/>
+    <ellipse cx="13" cy="50" rx="7" ry="4" fill="#2d5a1a" transform="rotate(-25 13 50)"/>
+    <ellipse cx="27" cy="45" rx="7" ry="4" fill="#2d5a1a" transform="rotate(25 27 45)"/>
+    <ellipse cx="29" cy="35" rx="7" ry="4" fill="#3a7a2a" transform="rotate(-30 29 35)"/>
+    <ellipse cx="41" cy="30" rx="7" ry="4" fill="#3a7a2a" transform="rotate(30 41 30)"/>
+    <!-- 새 -->
+    <ellipse cx="45" cy="18" rx="5" ry="3" fill="#cc0000"/>
+    <line x1="40" y1="18" x2="34" y2="14" stroke="#cc0000" stroke-width="1.5"/>
+    <line x1="50" y1="18" x2="56" y2="14" stroke="#cc0000" stroke-width="1.5"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">4月</text>
+  </svg>`,
+  5: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 난초 -->
+    <line x1="30" y1="78" x2="30" y2="30" stroke="#5a7a1a" stroke-width="2"/>
+    <path d="M30,60 Q15,45 10,30" stroke="#5a7a1a" stroke-width="2" fill="none"/>
+    <path d="M30,55 Q45,40 50,28" stroke="#5a7a1a" stroke-width="2" fill="none"/>
+    <path d="M30,50 Q20,38 22,22" stroke="#5a7a1a" stroke-width="2" fill="none"/>
+    <!-- 난초꽃 -->
+    <ellipse cx="10" cy="28" rx="5" ry="3" fill="#cc88ff" transform="rotate(-20 10 28)"/>
+    <ellipse cx="50" cy="26" rx="5" ry="3" fill="#cc88ff" transform="rotate(20 50 26)"/>
+    <ellipse cx="22" cy="20" rx="5" ry="3" fill="#dd99ff" transform="rotate(-10 22 20)"/>
+    <ellipse cx="30" cy="18" rx="5" ry="3" fill="#cc88ff"/>
+    <circle cx="30" cy="18" r="2" fill="#ffaaff"/>
+    <circle cx="10" cy="28" r="1.5" fill="#ffaaff"/>
+    <circle cx="50" cy="26" r="1.5" fill="#ffaaff"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">5月</text>
+  </svg>`,
+  6: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 모란 줄기/잎 -->
+    <line x1="30" y1="78" x2="30" y2="40" stroke="#4a6a1a" stroke-width="2.5"/>
+    <ellipse cx="18" cy="52" rx="9" ry="5" fill="#3a6a1a" transform="rotate(-30 18 52)"/>
+    <ellipse cx="42" cy="50" rx="9" ry="5" fill="#3a6a1a" transform="rotate(30 42 50)"/>
+    <!-- 모란꽃 -->
+    <circle cx="30" cy="28" r="14" fill="#cc2244"/>
+    <circle cx="30" cy="28" r="11" fill="#dd3355"/>
+    <circle cx="30" cy="28" r="8" fill="#ee4466"/>
+    <circle cx="30" cy="28" r="5" fill="#ff6688"/>
+    <circle cx="30" cy="28" r="2.5" fill="#ffcc00"/>
+    <!-- 꽃잎 -->
+    <ellipse cx="30" cy="15" rx="5" ry="8" fill="#dd3355" opacity="0.8"/>
+    <ellipse cx="30" cy="41" rx="5" ry="8" fill="#dd3355" opacity="0.8"/>
+    <ellipse cx="17" cy="28" rx="8" ry="5" fill="#dd3355" opacity="0.8"/>
+    <ellipse cx="43" cy="28" rx="8" ry="5" fill="#dd3355" opacity="0.8"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">6月</text>
+  </svg>`,
+  7: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 홍싸리 -->
+    <line x1="20" y1="78" x2="22" y2="20" stroke="#4a3a2a" stroke-width="2"/>
+    <line x1="38" y1="78" x2="36" y2="22" stroke="#4a3a2a" stroke-width="2"/>
+    <ellipse cx="14" cy="38" rx="7" ry="4" fill="#cc4422" transform="rotate(-30 14 38)"/>
+    <ellipse cx="28" cy="32" rx="7" ry="4" fill="#cc4422" transform="rotate(25 28 32)"/>
+    <ellipse cx="13" cy="53" rx="7" ry="4" fill="#dd5533" transform="rotate(-25 13 53)"/>
+    <ellipse cx="29" cy="47" rx="7" ry="4" fill="#cc4422" transform="rotate(30 29 47)"/>
+    <ellipse cx="30" cy="38" rx="7" ry="4" fill="#ee6644" transform="rotate(-20 30 38)"/>
+    <ellipse cx="44" cy="32" rx="7" ry="4" fill="#cc4422" transform="rotate(25 44 32)"/>
+    <!-- 멧돼지 -->
+    <ellipse cx="44" cy="68" rx="8" ry="5" fill="#5a4a3a"/>
+    <ellipse cx="50" cy="66" rx="5" ry="4" fill="#5a4a3a"/>
+    <circle cx="52" cy="65" r="1.5" fill="#3a2a1a"/>
+    <line x1="44" y1="73" x2="40" y2="78" stroke="#5a4a3a" stroke-width="2"/>
+    <line x1="46" y1="73" x2="44" y2="78" stroke="#5a4a3a" stroke-width="2"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">7月</text>
+  </svg>`,
+  8: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#0a0a2a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 밤하늘 -->
+    <circle cx="10" cy="12" r="1" fill="white" opacity="0.8"/>
+    <circle cx="50" cy="8" r="1" fill="white" opacity="0.8"/>
+    <circle cx="35" cy="15" r="0.8" fill="white" opacity="0.7"/>
+    <!-- 보름달 -->
+    <circle cx="30" cy="25" r="16" fill="#ffeeaa"/>
+    <circle cx="30" cy="25" r="14" fill="#ffdd88"/>
+    <!-- 달 표면 무늬 -->
+    <circle cx="25" cy="20" r="3" fill="#eebb66" opacity="0.5"/>
+    <circle cx="35" cy="28" r="4" fill="#eebb66" opacity="0.4"/>
+    <circle cx="28" cy="30" r="2" fill="#eebb66" opacity="0.4"/>
+    <!-- 산 실루엣 -->
+    <polygon points="0,45 20,28 40,38 60,25 60,45" fill="#1a1a3a"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">8月</text>
+  </svg>`,
+  9: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 국화 줄기/잎 -->
+    <line x1="30" y1="78" x2="30" y2="38" stroke="#4a6a1a" stroke-width="2"/>
+    <ellipse cx="18" cy="55" rx="9" ry="5" fill="#3a6a1a" transform="rotate(-30 18 55)"/>
+    <ellipse cx="42" cy="52" rx="9" ry="5" fill="#3a6a1a" transform="rotate(30 42 52)"/>
+    <!-- 국화꽃 -->
+    <circle cx="30" cy="26" r="4" fill="#ffdd00"/>
+    <!-- 꽃잎 (국화는 많은 꽃잎) -->
+    <ellipse cx="30" cy="14" rx="3" ry="6" fill="#ffee44"/>
+    <ellipse cx="30" cy="38" rx="3" ry="6" fill="#ffee44"/>
+    <ellipse cx="18" cy="26" rx="6" ry="3" fill="#ffee44"/>
+    <ellipse cx="42" cy="26" rx="6" ry="3" fill="#ffee44"/>
+    <ellipse cx="21" cy="17" rx="3" ry="6" fill="#ffcc00" transform="rotate(45 21 17)"/>
+    <ellipse cx="39" cy="17" rx="3" ry="6" fill="#ffcc00" transform="rotate(-45 39 17)"/>
+    <ellipse cx="21" cy="35" rx="3" ry="6" fill="#ffcc00" transform="rotate(-45 21 35)"/>
+    <ellipse cx="39" cy="35" rx="3" ry="6" fill="#ffcc00" transform="rotate(45 39 35)"/>
+    <circle cx="30" cy="26" r="4" fill="#ffbb00"/>
+    <circle cx="30" cy="26" r="2" fill="#ff8800"/>
+    <!-- 술잔 -->
+    <rect x="24" y="62" width="12" height="8" rx="2" fill="#cc8800"/>
+    <rect x="22" y="60" width="16" height="3" rx="1" fill="#ddaa00"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">9月</text>
+  </svg>`,
+  10: `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg">
+    <rect width="60" height="90" fill="#1a1a1a" rx="4"/>
+    <rect width="60" height="45" y="45" fill="#cc0000" rx="4"/>
+    <!-- 단풍 나무 줄기 -->
+    <line x1="30" y1="78" x2="30" y2="38" stroke="#6b4423" stroke-width="3"/>
+    <line x1="30" y1="55" x2="18" y2="44" stroke="#6b4423" stroke-width="2"/>
+    <line x1="30" y1="50" x2="42" y2="40" stroke="#6b4423" stroke-width="2"/>
+    <!-- 단풍잎 -->
+    <path d="M30,22 L25,30 L18,28 L22,22 L16,18 L24,18 L30,12 L36,18 L44,18 L38,22 L42,28 L35,30 Z" fill="#cc4400"/>
+    <path d="M16,32 L12,40 L6,38 L10,32 L4,28 L12,28 L16,22 L20,28 L26,28 L22,34 L24,40 L18,40 Z" fill="#dd5500" opacity="0.85"/>
+    <path d="M44,30 L40,38 L34,36 L38,30 L32,26 L40,26 L44,20 L48,26 L54,26 L50,32 L52,38 L46,38 Z" fill="#ee6600" opacity="0.85"/>
+    <text x="4" y="10" fill="#ffcc00" font-size="7" font-weight="bold" font-family="sans-serif">10月</text>
+  </svg>`,
+};
+
 function makeCardEl(card, faceUp, idx) {
   const div = document.createElement('div');
   div.className = `card ${faceUp ? 'face-up' : 'face-down'}`;
+  div.style.cssText = 'width:64px;height:96px;border-radius:6px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.6);border:1.5px solid rgba(255,255,255,0.15);flex-shrink:0;';
   if (faceUp) {
-    div.innerHTML = `
-      <div class="card-month">${card.name}</div>
-      <div class="card-emoji">${card.emoji}</div>
-      <div class="card-name">${card.flower}</div>
-    `;
+    const svg = CARD_SVGS[card.month] || CARD_SVGS[1];
+    div.innerHTML = svg;
+    div.querySelector('svg').style.cssText = 'width:100%;height:100%;display:block;';
+  } else {
+    // 뒷면: 전통 화투 뒷면 패턴
+    div.innerHTML = `<svg viewBox="0 0 60 90" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block;">
+      <rect width="60" height="90" fill="#8b0000" rx="4"/>
+      <rect x="4" y="4" width="52" height="82" fill="none" stroke="#cc2222" stroke-width="1" rx="3"/>
+      <rect x="8" y="8" width="44" height="74" fill="none" stroke="#aa1111" stroke-width="0.5" rx="2"/>
+      <!-- 격자 패턴 -->
+      <line x1="0" y1="18" x2="60" y2="18" stroke="#aa1111" stroke-width="0.5" opacity="0.5"/>
+      <line x1="0" y1="36" x2="60" y2="36" stroke="#aa1111" stroke-width="0.5" opacity="0.5"/>
+      <line x1="0" y1="54" x2="60" y2="54" stroke="#aa1111" stroke-width="0.5" opacity="0.5"/>
+      <line x1="0" y1="72" x2="60" y2="72" stroke="#aa1111" stroke-width="0.5" opacity="0.5"/>
+      <line x1="20" y1="0" x2="20" y2="90" stroke="#aa1111" stroke-width="0.5" opacity="0.5"/>
+      <line x1="40" y1="0" x2="40" y2="90" stroke="#aa1111" stroke-width="0.5" opacity="0.5"/>
+      <!-- 중앙 문양 -->
+      <circle cx="30" cy="45" r="12" fill="none" stroke="#cc3333" stroke-width="1.5"/>
+      <circle cx="30" cy="45" r="7" fill="#cc2222"/>
+      <text x="30" y="49" text-anchor="middle" fill="#ffcc00" font-size="8" font-weight="bold" font-family="sans-serif">花</text>
+    </svg>`;
   }
   return div;
 }
