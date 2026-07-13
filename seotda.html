@@ -934,10 +934,18 @@ function listenMultiRound() {
   const r = ref(db, `rooms/${G.roomCode}/round_data`);
   const fn = onValue(r, snap => {
     if (!snap.exists()) return;
-    if (G.roundResolved && snap.val()?.status !== 'betting') return; // ★ 이미 처리된 라운드는 무시
     const d = snap.val();
 
-    // Sync hands for guest
+    // ★ Firebase의 라운드 번호가 내 현재 라운드와 다르면 완전 무시
+    if (d.round !== G.roundNum) return;
+
+    // ★ 이미 이 라운드를 처리했으면 무시 (중복 팝업 방지)
+    if (G.roundResolved) return;
+
+    const myKey  = G.myRole === 'host' ? 'host' : 'guest';
+    const oppKey = G.myRole === 'host' ? 'guest' : 'host';
+
+    // Sync hands
     if (G.myRole === 'guest' && d.guestHand) {
       G.myHand  = d.guestHand;
       G.oppHand = d.hostHand;
@@ -946,9 +954,6 @@ function listenMultiRound() {
       G.myHand  = d.hostHand;
       G.oppHand = d.guestHand;
     }
-
-    const myKey  = G.myRole === 'host' ? 'host' : 'guest';
-    const oppKey = G.myRole === 'host' ? 'guest' : 'host';
 
     G.pot        = d.pot || 0;
     G.currentBet = d.currentBet || 0;
@@ -963,9 +968,8 @@ function listenMultiRound() {
     const action = d.action;
 
     // ★ 게스트: 호스트가 정산한 결과 수신
-    if (G.myRole === 'guest' && d.settled && !G.roundResolved) {
+    if (G.myRole === 'guest' && d.settled === true) {
       G.roundResolved = true;
-      // guest 기준: host=opp, guest=me
       G.chips.me  = d.guestChips;
       G.chips.opp = d.hostChips;
       G.pot = 0;
@@ -999,23 +1003,42 @@ function listenMultiRound() {
       resolveRoundMulti(d);
     } else if (d.status === 'die') {
       if (G.roundResolved) return; // ★ 중복 처리 방지
-      G.roundResolved = true;
-      const dier = d.dier; // 'host' or 'guest'
-      hideBetButtons();
-      if (dier === oppKey) {
-        // 상대가 다이 → 내가 이김
-        setLog('상대가 다이했습니다!');
-        awardPot('me');
+
+      // ★ die도 settled 방식으로 처리 — 호스트만 정산
+      if (G.myRole === 'host' && !d.settled) {
+        G.roundResolved = true;
+        const dier = d.dier;
+        const winnerKey = (dier === 'host') ? 'guest' : 'host'; // 다이한 쪽이 짐
+        const pot = d.pot || 0;
+        const newHostChips  = G.chips.me  + (winnerKey === 'host'  ? pot : 0);
+        const newGuestChips = G.chips.opp + (winnerKey === 'guest' ? pot : 0);
+        update(ref(db, `rooms/${G.roomCode}/round_data`), {
+          settled: true, winnerKey,
+          hostChips: newHostChips, guestChips: newGuestChips,
+        });
+        G.chips.me  = newHostChips;
+        G.chips.opp = newGuestChips;
+        G.pot = 0;
+        updateUI();
+        hideBetButtons();
         const myR  = getHandRank(G.myHand[0], G.myHand[1]);
         const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
-        setTimeout(() => showRoundResult('me', myR, oppR), 500);
-      } else {
-        // 내가 다이 → 상대가 이김
-        setLog('내가 다이했습니다.');
-        awardPot('opp');
+        const winner = winnerKey === 'host' ? 'me' : 'opp';
+        setLog(dier === 'guest' ? '상대가 다이했습니다!' : '내가 다이했습니다.');
+        setTimeout(() => showRoundResult(winner, myR, oppR), 500);
+
+      } else if (G.myRole === 'guest' && d.settled === true) {
+        G.roundResolved = true;
+        G.chips.me  = d.guestChips;
+        G.chips.opp = d.hostChips;
+        G.pot = 0;
+        updateUI();
+        hideBetButtons();
         const myR  = getHandRank(G.myHand[0], G.myHand[1]);
         const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
-        setTimeout(() => showRoundResult('opp', myR, oppR), 500);
+        const winner = d.winnerKey === 'guest' ? 'me' : 'opp';
+        setLog(d.dier === 'host' ? '상대가 다이했습니다!' : '내가 다이했습니다.');
+        setTimeout(() => showRoundResult(winner, myR, oppR), 500);
       }
     }
   });
