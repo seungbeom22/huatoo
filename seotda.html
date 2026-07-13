@@ -844,6 +844,19 @@ function cleanupFirebase() {
   G.listeners = [];
 }
 
+// ★ 상대에게 접속 끊김 알림 (페이지 이탈/새로고침 시)
+window.addEventListener('beforeunload', () => {
+  if (G.mode === 'multi' && G.roomCode) {
+    // Firebase REST API로 동기적 알림 (beforeunload에선 비동기 불가)
+    try {
+      navigator.sendBeacon(
+        `https://huatoo-default-rtdb.firebaseio.com/rooms/${G.roomCode}/status.json`,
+        JSON.stringify('disconnected')
+      );
+    } catch(e) {}
+  }
+});
+
 /* ═══════════════════════════
    🃏 ROUND LOGIC
    ═══════════════════════════ */
@@ -852,7 +865,7 @@ function startRound() {
   G.pot = 0; G.currentBet = 0; G.myBet = 0; G.oppBet = 0;
   G.myDied = false; G.oppDied = false;
   G.betPhase = true; G.myTurn = true; G.roundActive = true;
-  G.aiChecked = false;
+  G.aiChecked = false; G.roundResolved = false;
 
   const deck = shuffle(buildDeck());
   G.myHand  = [deck[0], deck[1]];
@@ -870,7 +883,7 @@ function startMultiRound() {
   if (G.roundNum > G.totalRounds) { endGame(); return; }
   G.pot = 0; G.currentBet = 0; G.myBet = 0; G.oppBet = 0;
   G.myDied = false; G.oppDied = false;
-  G.betPhase = true;
+  G.betPhase = true; G.roundResolved = false;
 
   if (G.myRole === 'host') {
     // Host deals and writes cards to Firebase
@@ -888,9 +901,11 @@ function startMultiRound() {
       hostHand:  hostHand.map(c=>({month:c.month,name:c.name,emoji:c.emoji,flower:c.flower,card:c.card})),
       guestHand: guestHand.map(c=>({month:c.month,name:c.name,emoji:c.emoji,flower:c.flower,card:c.card})),
       pot: 0, currentBet: 0, hostBet: 0, guestBet: 0,
+      hostChips: G.chips.me,   // ★ 현재 칩 기록 (정산 기준점)
+      guestChips: G.chips.opp,
       turn: hostFirst ? 'host' : 'guest',
       round: G.roundNum, status: 'betting',
-      action: null,
+      action: null, checkedBy: null, settled: false,
     });
   } else {
     G.myTurn = false; // wait for data
@@ -904,9 +919,22 @@ function startMultiRound() {
 
 function listenMultiRound() {
   cleanupFirebase();
+
+  // ★ 상대 접속 끊김 감지 (한 번만 처리)
+  const connRef = ref(db, `rooms/${G.roomCode}/status`);
+  const connFn = onValue(connRef, snap => {
+    if (snap.exists() && snap.val() === 'disconnected' && !G.roundResolved) {
+      G.roundResolved = true;
+      cleanupFirebase();
+      showModal('🏆', '승리!', '상대방이 접속을 종료했습니다.', null, '처음으로', null, () => { hideModal(); gotoMenu(); });
+    }
+  });
+  G.listeners.push({ r: connRef, fn: connFn });
+
   const r = ref(db, `rooms/${G.roomCode}/round_data`);
   const fn = onValue(r, snap => {
     if (!snap.exists()) return;
+    if (G.roundResolved && snap.val()?.status !== 'betting') return; // ★ 이미 처리된 라운드는 무시
     const d = snap.val();
 
     // Sync hands for guest
@@ -934,6 +962,22 @@ function listenMultiRound() {
 
     const action = d.action;
 
+    // ★ 게스트: 호스트가 정산한 결과 수신
+    if (G.myRole === 'guest' && d.settled && !G.roundResolved) {
+      G.roundResolved = true;
+      // guest 기준: host=opp, guest=me
+      G.chips.me  = d.guestChips;
+      G.chips.opp = d.hostChips;
+      G.pot = 0;
+      updateUI();
+      renderCards(true);
+      const myR  = getHandRank(G.myHand[0], G.myHand[1]);
+      const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
+      const winner = d.winnerKey === 'guest' ? 'me' : d.winnerKey === 'host' ? 'opp' : null;
+      setTimeout(() => showRoundResult(winner, myR, oppR), 500);
+      return;
+    }
+
     if (d.status === 'betting') {
       if (G.myTurn) {
         if (G.currentBet === 0) {
@@ -954,19 +998,24 @@ function listenMultiRound() {
       hideBetButtons();
       resolveRoundMulti(d);
     } else if (d.status === 'die') {
+      if (G.roundResolved) return; // ★ 중복 처리 방지
+      G.roundResolved = true;
       const dier = d.dier; // 'host' or 'guest'
-      if (dier === myKey) {
-        setLog('내가 다이했습니다.');
-      } else {
-        setLog('상대가 다이했습니다!');
-        awardPot(myKey === 'host' ? 'me' : 'me'); // you win
-      }
       hideBetButtons();
       if (dier === oppKey) {
-        // I win the pot
-        setTimeout(() => afterRoundMulti('me'), 1200);
+        // 상대가 다이 → 내가 이김
+        setLog('상대가 다이했습니다!');
+        awardPot('me');
+        const myR  = getHandRank(G.myHand[0], G.myHand[1]);
+        const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
+        setTimeout(() => showRoundResult('me', myR, oppR), 500);
       } else {
-        setTimeout(() => afterRoundMulti('opp'), 1200);
+        // 내가 다이 → 상대가 이김
+        setLog('내가 다이했습니다.');
+        awardPot('opp');
+        const myR  = getHandRank(G.myHand[0], G.myHand[1]);
+        const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
+        setTimeout(() => showRoundResult('opp', myR, oppR), 500);
       }
     }
   });
@@ -1025,13 +1074,15 @@ window.doRaise = function() {
 };
 
 window.doDie = function() {
-  if (!G.myTurn) return;
+  if (!G.myTurn || G.myDied) return;
   G.myDied = true;
   setLog('다이! 이번 판을 포기합니다.');
   hideBetButtons();
   if (G.mode === 'ai') {
+    const myR  = getHandRank(G.myHand[0], G.myHand[1]);
+    const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
     awardPot('opp');
-    setTimeout(() => afterRoundAI('opp'), 1000);
+    setTimeout(() => showRoundResult('opp', myR, oppR), 500);
   } else {
     multiSendAction('die', 0);
   }
@@ -1125,10 +1176,13 @@ function aiDoRaise(amt) {
 }
 
 function aiDoDie() {
+  if (G.oppDied) return; // 중복 호출 방지
   G.oppDied = true;
+  const myR  = getHandRank(G.myHand[0], G.myHand[1]);
+  const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
   setLog('AI가 다이했습니다! 이번 판 승리!');
   awardPot('me');
-  setTimeout(() => afterRoundAI('me'), 1000);
+  setTimeout(() => showRoundResult('me', myR, oppR), 500);
 }
 
 function aiDoCheck() {
@@ -1164,18 +1218,42 @@ function showdown() {
 }
 
 function resolveRoundMulti(d) {
-  const myKey  = G.myRole === 'host' ? 'host' : 'guest';
-  const oppKey = G.myRole === 'host' ? 'guest' : 'host';
-  const result = compareHands(G.myHand, G.oppHand);
-  let winner;
-  if (result > 0) winner = 'me';
-  else if (result < 0) winner = 'opp';
-  else winner = null;
-  awardPot(winner);
+  if (G.roundResolved) return; // ★ 중복 정산 방지
+  G.roundResolved = true;
   renderCards(true);
   const myR  = getHandRank(G.myHand[0], G.myHand[1]);
   const oppR = getHandRank(G.oppHand[0], G.oppHand[1]);
-  setTimeout(() => showRoundResult(winner, myR, oppR), 500);
+
+  if (G.myRole === 'host') {
+    // ★ 호스트만 정산 계산 후 Firebase에 기록
+    const result = compareHands(G.myHand, G.oppHand); // myHand=호스트 기준
+    const pot = d.pot || 0;
+    let winnerKey = null; // 'host' | 'guest' | null
+    if (result > 0) winnerKey = 'host';
+    else if (result < 0) winnerKey = 'guest';
+
+    const newHostChips = (d.hostChips || G.chips.me) + (winnerKey === 'host' ? pot : 0);
+    const newGuestChips = (d.guestChips || G.chips.opp) + (winnerKey === 'guest' ? pot : 0);
+
+    update(ref(db, `rooms/${G.roomCode}/round_data`), {
+      settled: true,
+      winnerKey,
+      hostChips: newHostChips,
+      guestChips: newGuestChips,
+    });
+
+    G.chips.me  = newHostChips;
+    G.chips.opp = newGuestChips;
+    G.pot = 0;
+    updateUI();
+
+    const winner = winnerKey === 'host' ? 'me' : winnerKey === 'guest' ? 'opp' : null;
+    setTimeout(() => showRoundResult(winner, myR, oppR), 500);
+  } else {
+    // ★ 게스트는 Firebase에 settled 결과가 올 때까지 대기
+    // (이미 onValue 리스너가 settled 를 감지해 처리함)
+    // 여기서는 아무것도 하지 않음 — listenMultiRound의 settled 블록이 처리
+  }
 }
 
 function awardPot(winner) {
@@ -1230,6 +1308,7 @@ function afterRoundAI(winner) {
 
 function afterRoundMulti(winner) {
   hideModal();
+  G.roundResolved = false; // 다음 라운드 위해 리셋
   if (G.roundNum > G.totalRounds || G.chips.me <= 0 || G.chips.opp <= 0) {
     endGame(); return;
   }
@@ -1292,8 +1371,16 @@ function multiSendAction(action, amount) {
       updates.turn = oppKey;
       updates.status = 'betting';
     } else if (action === 'check') {
-      updates.turn = oppKey;
-      updates.status = 'betting';
+      // ★ 상대도 이미 체크했으면(checkedBy 존재하면) → 쇼다운
+      if (d.checkedBy && d.checkedBy !== myKey) {
+        updates.status = 'showdown';
+        updates.turn = null;
+        updates.checkedBy = null;
+      } else {
+        updates.turn = oppKey;
+        updates.status = 'betting';
+        updates.checkedBy = myKey;
+      }
     } else if (action === 'die') {
       updates.status = 'die';
       updates.dier = myKey;
